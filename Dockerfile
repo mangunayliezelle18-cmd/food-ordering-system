@@ -31,12 +31,13 @@ RUN mkdir -p database \
     storage/framework/sessions \
     storage/logs \
     storage/app/public \
-    bootstrap/cache
+    bootstrap/cache \
+    public/delivery_proofs
 
 RUN touch database/database.sqlite
 
-RUN chown -R www-data:www-data storage bootstrap/cache database
-RUN chmod -R 775 storage bootstrap/cache database
+RUN chown -R www-data:www-data storage bootstrap/cache database public/delivery_proofs
+RUN chmod -R 775 storage bootstrap/cache database public/delivery_proofs
 
 RUN a2enmod rewrite
 
