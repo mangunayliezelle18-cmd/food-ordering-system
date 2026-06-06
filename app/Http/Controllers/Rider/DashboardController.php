@@ -25,7 +25,9 @@ class DashboardController extends Controller
             ->paginate(12);
 
         $activeDeliveries = Order::whereIn('status', ['approved', 'preparing', 'out_for_delivery'])->count();
-        $myDelivered = Order::where('status', 'delivered')->where('rider_id', Auth::id())->count();
+        $myDelivered = Order::where('status', 'delivered')
+            ->where('rider_id', Auth::id())
+            ->count();
 
         return view('rider.dashboard', compact('orders', 'activeDeliveries', 'myDelivered'));
     }
@@ -71,31 +73,61 @@ class DashboardController extends Controller
 
         $request->validate([
             'delivery_note' => ['nullable', 'string', 'max:1000'],
+            'delivery_proof_base64' => ['nullable', 'string'],
         ]);
 
-        // PROJECT-SIDE FIX:
-        // 1) Try normal file upload.
-        // 2) If PHP upload fails, use the browser Base64 backup from the hidden input.
-        // 3) Only create a text fallback if both methods fail.
         $file = $request->file('delivery_proof');
         $proofDirectory = public_path('delivery_proofs');
         $proofPath = null;
-        $uploadProblem = $file ? $this->uploadErrorMessage($file->getError()) : 'No normal file upload received';
 
-        if (! File::exists($proofDirectory)) {
-            File::makeDirectory($proofDirectory, 0755, true);
+        $uploadProblem = $file
+            ? $this->uploadErrorMessage($file->getError())
+            : 'No normal file upload received';
+
+        /*
+         |--------------------------------------------------------------------------
+         | Create delivery_proofs folder safely
+         |--------------------------------------------------------------------------
+         | Local usually works.
+         | Render can fail if folder is missing or not writable.
+         | This prevents 500 server error.
+         */
+        try {
+            if (! File::exists($proofDirectory)) {
+                File::makeDirectory($proofDirectory, 0775, true);
+            }
+        } catch (\Throwable $e) {
+            // Do not crash. Base64/fallback will still try.
         }
 
-        // Normal file upload path.
-        if ($file && $file->isValid()) {
-            $extension = strtolower($file->getClientOriginalExtension() ?: $file->extension() ?: 'jpg');
-            $extension = preg_replace('/[^a-z0-9]/', '', $extension) ?: 'jpg';
-            $filename = 'order-' . $order->id . '-' . now()->format('YmdHis') . '-' . Str::random(8) . '.' . $extension;
-            $file->move($proofDirectory, $filename);
-            $proofPath = 'delivery_proofs/' . $filename;
+        /*
+         |--------------------------------------------------------------------------
+         | 1. Try normal file upload
+         |--------------------------------------------------------------------------
+         */
+        try {
+            if ($file && $file->isValid() && File::exists($proofDirectory)) {
+                $extension = strtolower($file->getClientOriginalExtension() ?: $file->extension() ?: 'jpg');
+                $extension = preg_replace('/[^a-z0-9]/', '', $extension) ?: 'jpg';
+
+                $filename = 'order-' . $order->id . '-' . now()->format('YmdHis') . '-' . Str::random(8) . '.' . $extension;
+
+                $file->move($proofDirectory, $filename);
+
+                $proofPath = 'delivery_proofs/' . $filename;
+            }
+        } catch (\Throwable $e) {
+            $proofPath = null;
+            $uploadProblem = 'Normal upload failed on server: ' . $e->getMessage();
         }
 
-        // Base64 backup path. This still works even when PHP temporary upload folder fails.
+        /*
+         |--------------------------------------------------------------------------
+         | 2. Try Base64 backup
+         |--------------------------------------------------------------------------
+         | This is the important project-side fix.
+         | The rider page must have delivery_proof_base64 hidden input.
+         */
         if (! $proofPath && $request->filled('delivery_proof_base64')) {
             $proofPath = $this->saveBase64Proof(
                 $request->input('delivery_proof_base64'),
@@ -104,19 +136,18 @@ class DashboardController extends Controller
             );
         }
 
-        // Last fallback for demo only: a text record, not an image.
+        /*
+         |--------------------------------------------------------------------------
+         | 3. Final fallback text proof
+         |--------------------------------------------------------------------------
+         | If image cannot be saved, still mark delivered so demo continues.
+         */
         if (! $proofPath) {
-            $filename = 'order-' . $order->id . '-' . now()->format('YmdHis') . '-proof-submitted.txt';
-            $proofPath = 'delivery_proofs/' . $filename;
-            $message = "Delivery proof submitted, but no image data could be saved.\n";
-            $message .= "This fallback file was created so the project demo can continue.\n";
-            $message .= "Order ID: {$order->id}\n";
-            $message .= "Rider ID: " . Auth::id() . "\n";
-            $message .= "Upload error: " . $uploadProblem . "\n";
-            File::put(public_path($proofPath), $message);
+            $proofPath = $this->saveTextFallbackProof($order, $proofDirectory, $uploadProblem);
         }
 
         $notes = $order->notes;
+
         if ($request->filled('delivery_note')) {
             $notes = trim(($notes ? $notes . "\n\n" : '') . 'Rider delivery note: ' . $request->input('delivery_note'));
         }
@@ -134,7 +165,6 @@ class DashboardController extends Controller
             ->with('success', 'Order marked as delivered. Proof record saved for admin.');
     }
 
-
     private function saveBase64Proof(?string $base64, int $orderId, string $proofDirectory): ?string
     {
         if (! $base64 || ! str_contains($base64, ',')) {
@@ -142,6 +172,14 @@ class DashboardController extends Controller
         }
 
         if (! preg_match('/^data:image\/(jpeg|jpg|png|webp|gif|bmp);base64,/', $base64, $matches)) {
+            return null;
+        }
+
+        try {
+            if (! File::exists($proofDirectory)) {
+                File::makeDirectory($proofDirectory, 0775, true);
+            }
+        } catch (\Throwable $e) {
             return null;
         }
 
@@ -156,9 +194,39 @@ class DashboardController extends Controller
         }
 
         $filename = 'order-' . $orderId . '-' . now()->format('YmdHis') . '-' . Str::random(8) . '-base64.' . $extension;
-        File::put($proofDirectory . DIRECTORY_SEPARATOR . $filename, $imageData);
+
+        try {
+            File::put($proofDirectory . DIRECTORY_SEPARATOR . $filename, $imageData);
+        } catch (\Throwable $e) {
+            return null;
+        }
 
         return 'delivery_proofs/' . $filename;
+    }
+
+    private function saveTextFallbackProof(Order $order, string $proofDirectory, string $uploadProblem): ?string
+    {
+        try {
+            if (! File::exists($proofDirectory)) {
+                File::makeDirectory($proofDirectory, 0775, true);
+            }
+
+            $filename = 'order-' . $order->id . '-' . now()->format('YmdHis') . '-proof-submitted.txt';
+            $proofPath = 'delivery_proofs/' . $filename;
+
+            $message = "Delivery proof submitted, but no image data could be saved.\n";
+            $message .= "This fallback file was created so the project demo can continue.\n";
+            $message .= "Order ID: {$order->id}\n";
+            $message .= "Rider ID: " . Auth::id() . "\n";
+            $message .= "Upload error: " . $uploadProblem . "\n";
+
+            File::put(public_path($proofPath), $message);
+
+            return $proofPath;
+        } catch (\Throwable $e) {
+            // Very last safety: no proof path, but order can still be delivered.
+            return null;
+        }
     }
 
     private function uploadErrorMessage(int $errorCode): string
