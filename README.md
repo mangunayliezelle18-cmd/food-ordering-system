@@ -3,7 +3,7 @@
 ## Submitted By
 
 - Lizelle mangunay
-- Jubelle kate pridas
+- Jubelle Kate Pridas
 - Jenny Flores
 
 A Laravel-based Food Ordering System made for a final project. The system allows customers to browse menu items and place orders, admins to manage menu items and orders, and riders to handle deliveries with delivery proof upload.
