@@ -4,7 +4,7 @@
 
 - Lizelle mangunay
 - Jubelle kate pridas
-- Jenny flores
+- Jenny Flores
 
 A Laravel-based Food Ordering System made for a final project. The system allows customers to browse menu items and place orders, admins to manage menu items and orders, and riders to handle deliveries with delivery proof upload.
 
