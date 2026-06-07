@@ -2,7 +2,7 @@
 
 ## Submitted By
 
-- Lizelle mangunay
+- Lizelle Mangunay
 - Jubelle Kate Pridas
 - Jenny Flores
 
